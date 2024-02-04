@@ -1,6 +1,5 @@
 #include "FbxLoader.h"
-#include <assert.h>
-#include <math.h>
+#include <unordered_map>
 
 FbxLoader::Parser::Parser(FbxString fbxFile)
 {
@@ -86,13 +85,23 @@ bool FbxLoader::Parser::LoadScene()
 
 	if (status)
 	{
+		std::vector<FbxNode*> _meshes;
+		FindMeshes(pScene->GetRootNode(), _meshes);
+		
+		for (FbxNode* node : _meshes)
+		{
+			FbxMesh* mesh = node->GetMesh();
+
+			
+			if (mesh->GetElementBinormalCount() == 0 || mesh->GetElementTangentCount() == 0)
+				mesh->GenerateTangentsDataForAllUVSets();
+		}
+
 		// Convert axis system
 		FbxAxisSystem sceneAxisSystem = pScene->GetGlobalSettings().GetAxisSystem();
-		FbxAxisSystem localAxisSystem(FbxAxisSystem::MayaYUp);
-		//FbxAxisSystem localAxisSystem(FbxAxisSystem::eDirectX);
-		if (sceneAxisSystem != localAxisSystem)
+		FbxAxisSystem localAxisSystem(FbxAxisSystem::eDirectX);
+		//if (sceneAxisSystem != localAxisSystem)
 		{
-			//localAxisSystem.ConvertScene(pScene);
 			localAxisSystem.DeepConvertScene(pScene);
 		}
 
@@ -145,80 +154,413 @@ void FbxLoader::Parser::FindMeshes(FbxNode* node, std::vector<FbxNode*>& _meshes
 	}
 }
 
-template<typename Element, typename ElementType = FbxVector4>
-void GetGeometryElement(FbxMesh* mesh, std::vector<ElementType>& elements)
+FbxVector4 ReadNormal(FbxMesh* mesh, int vertexIndex, int vertexCounter)
 {
-	int elementCount = 0;
-	Element* element = nullptr;
+	if (mesh->GetElementNormalCount() < 1) { return FbxVector4(0, 0, 0, 0); }
 
-	if constexpr (std::is_same<Element, FbxGeometryElementNormal>()) { elementCount = mesh->GetElementNormalCount(); element = mesh->GetElementNormal(0); }
-	else if constexpr (std::is_same<Element, FbxGeometryElementBinormal>()) { elementCount = mesh->GetElementBinormalCount(); element = mesh->GetElementBinormal(0); }
-	else if constexpr (std::is_same<Element, FbxGeometryElementTangent>()) { elementCount = mesh->GetElementTangentCount(); element = mesh->GetElementTangent(0); }
-	else if constexpr (std::is_same<Element, FbxGeometryElementUV>()) { elementCount = mesh->GetElementUVCount(); element = mesh->GetElementUV(0); }
-	else if constexpr (std::is_same<Element, FbxGeometryElementVertexColor>()) { elementCount = mesh->GetElementVertexColorCount(); element = mesh->GetElementVertexColor(0); }
-	else { static_assert(false, "Geometry element type not registered!"); }
+	FbxGeometryElementNormal* element = mesh->GetElementNormal(0);
 
-	if (elementCount < 1) return;
-
-	elements.resize(mesh->GetControlPointsCount());
-	memset(elements.data(), 0, sizeof(ElementType) * elements.size());
-
-	// Loop through each polygon and each vertex in the polygon
-	int polygonCount = mesh->GetPolygonCount();
-	int vertexCounter = 0;
-	for (int poly = 0; poly < polygonCount; poly++)
+	FbxVector4 normal = {};
+	switch (element->GetMappingMode())
 	{
-		for (int polyVertIndex = 0; polyVertIndex < 3; polyVertIndex++)
+	case FbxGeometryElement::eByControlPoint:
+		switch (element->GetReferenceMode())
 		{
-			int vertexIndex = mesh->GetPolygonVertex(poly, polyVertIndex);
-
-			ElementType result = {};
-			switch (element->GetMappingMode())
-			{
-			case FbxGeometryElement::eByControlPoint:
-				switch (element->GetReferenceMode())
-				{
-				case FbxGeometryElement::eDirect:
-				{
-					auto temp = element->GetDirectArray().GetAt(vertexIndex);
-					result = *(ElementType*)&temp;
-				} break;
-				case FbxGeometryElement::eIndexToDirect:
-				{
-					int index = element->GetIndexArray().GetAt(vertexIndex);
-					auto temp = element->GetDirectArray().GetAt(index);
-					result = *(ElementType*)&temp;
-				} break;
-				}
-				break;
-			case FbxGeometryElement::eByPolygonVertex:
-				switch (element->GetReferenceMode())
-				{
-				case FbxGeometryElement::eDirect:
-				{
-					auto temp = element->GetDirectArray().GetAt(vertexCounter);
-					result = *(ElementType*)&temp;
-				} break;
-				case FbxGeometryElement::eIndexToDirect:
-				{
-					int index = element->GetIndexArray().GetAt(vertexCounter);
-					auto temp = element->GetDirectArray().GetAt(index);
-					result = *(ElementType*)&temp;
-				} break;
-				default:
-					throw std::exception("Invalid Reference");
-				}
-			default:
-				break;
-			}
-
-			elements[vertexIndex] = result;
-			vertexCounter++;
+		case FbxGeometryElement::eDirect:
+		{
+			normal = element->GetDirectArray().GetAt(vertexIndex);
 		}
+		break;
+
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexIndex);
+			normal = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference");
+		}
+		break;
+	case FbxGeometryElement::eByPolygonVertex:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			normal = element->GetDirectArray().GetAt(vertexCounter);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexCounter);
+			normal = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default: throw std::exception("Invalid Reference");
+		}
+
+		break;
+	}
+
+	return normal;
+}
+FbxVector4 ReadBinormal(FbxMesh* mesh, int vertexIndex, int vertexCounter)
+{
+	if (mesh->GetElementBinormalCount() < 1) { return FbxVector4(0, 0, 0, 0); }
+
+	FbxGeometryElementBinormal* element = mesh->GetElementBinormal(0);
+
+	FbxVector4 binormal = {};
+	switch (element->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			binormal = element->GetDirectArray().GetAt(vertexIndex);
+		}
+		break;
+
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexIndex);
+			binormal = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference");
+		}
+		break;
+	case FbxGeometryElement::eByPolygonVertex:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			binormal = element->GetDirectArray().GetAt(vertexCounter);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexCounter);
+			binormal = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default: throw std::exception("Invalid Reference");
+		}
+
+		break;
+	}
+
+	return binormal;
+}
+FbxVector4 ReadTangent(FbxMesh* mesh, int vertexIndex, int vertexCounter)
+{
+	if (mesh->GetElementTangentCount() < 1) { return FbxVector4(0, 0, 0, 0); }
+
+	FbxGeometryElementTangent* element = mesh->GetElementTangent(0);
+
+	FbxVector4 tangent = {};
+	switch (element->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			tangent = element->GetDirectArray().GetAt(vertexIndex);
+		}
+		break;
+
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexIndex);
+			tangent = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference");
+		}
+		break;
+	case FbxGeometryElement::eByPolygonVertex:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			tangent = element->GetDirectArray().GetAt(vertexCounter);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexCounter);
+			tangent = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default: throw std::exception("Invalid Reference");
+		}
+		break;
+	}
+
+	return tangent;
+}
+FbxVector2 ReadUV(FbxMesh* mesh, int vertexIndex, int vertexCounter)
+{
+	if (mesh->GetElementUVCount() < 1) { return FbxVector2(0, 0); }
+
+	FbxGeometryElementUV* element = mesh->GetElementUV(0);
+
+	FbxVector2 uv = {};
+	switch (element->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			uv = element->GetDirectArray().GetAt(vertexIndex);
+		}
+		break;
+
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexIndex);
+			uv = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference");
+		}
+		break;
+	case FbxGeometryElement::eByPolygonVertex:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			uv = element->GetDirectArray().GetAt(vertexCounter);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexCounter);
+			uv = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default: throw std::exception("Invalid Reference");
+		}
+		break;
+	}
+
+#if FLIP_UV_Y
+	uv.mData[1] = 1.0f - uv.mData[1];
+#endif
+
+	return uv;
+}
+FbxColor ReadVertexColor(FbxMesh* mesh, int vertexIndex, int vertexCounter)
+{
+	if (mesh->GetElementVertexColorCount() < 1) { return FbxColor(1, 1, 1, 1); }
+
+	FbxGeometryElementVertexColor* element = mesh->GetElementVertexColor(0);
+
+	FbxColor color = {};
+	switch (element->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			color = element->GetDirectArray().GetAt(vertexIndex);
+		}
+		break;
+
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexIndex);
+			color = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference");
+		}
+		break;
+	case FbxGeometryElement::eByPolygonVertex:
+		switch (element->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			color = element->GetDirectArray().GetAt(vertexCounter);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			int index = element->GetIndexArray().GetAt(vertexCounter);
+			color = element->GetDirectArray().GetAt(index);
+		}
+		break;
+		default: throw std::exception("Invalid Reference");
+		}
+		break;
+	}
+
+	return color;
+}
+
+void GetElementMappingdataVec4(FbxLayerElementTemplate<FbxVector4>* anElement, int aFbxContolPointIdx, int aPolygonIdx, FbxVector4& outData)
+{
+	switch (anElement->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+	{
+		switch (anElement->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			outData.mData[0] = anElement->GetDirectArray().GetAt(aFbxContolPointIdx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(aFbxContolPointIdx).mData[1];
+			outData.mData[2] = anElement->GetDirectArray().GetAt(aFbxContolPointIdx).mData[2];
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			const int Idx = anElement->GetIndexArray().GetAt(aFbxContolPointIdx);
+			outData.mData[0] = anElement->GetDirectArray().GetAt(Idx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(Idx).mData[1];
+			outData.mData[2] = anElement->GetDirectArray().GetAt(Idx).mData[2];
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference Mode!");
+		}
+	}
+	break;
+
+	case FbxGeometryElement::eByPolygonVertex:
+	{
+		switch (anElement->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			outData.mData[0] = anElement->GetDirectArray().GetAt(aPolygonIdx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(aPolygonIdx).mData[1];
+			outData.mData[2] = anElement->GetDirectArray().GetAt(aPolygonIdx).mData[2];
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			const int Idx = anElement->GetIndexArray().GetAt(aPolygonIdx);
+			outData.mData[0] = anElement->GetDirectArray().GetAt(Idx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(Idx).mData[1];
+			outData.mData[2] = anElement->GetDirectArray().GetAt(Idx).mData[2];
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference Mode!");
+		}
+	}
+	break;
+	}
+}
+void GetElementMappingdataVec2(FbxLayerElementTemplate<FbxVector2>* anElement, int aFbxContolPointIdx, int aPolygonIdx, FbxVector2& outData)
+{
+	switch (anElement->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+	{
+		switch (anElement->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			outData.mData[0] = anElement->GetDirectArray().GetAt(aFbxContolPointIdx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(aFbxContolPointIdx).mData[1];
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			const int Idx = anElement->GetIndexArray().GetAt(aFbxContolPointIdx);
+			outData.mData[0] = anElement->GetDirectArray().GetAt(Idx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(Idx).mData[1];
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference Mode!");
+		}
+	}
+	break;
+
+	case FbxGeometryElement::eByPolygonVertex:
+	{
+		switch (anElement->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			outData.mData[0] = anElement->GetDirectArray().GetAt(aPolygonIdx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(aPolygonIdx).mData[1];
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			const int Idx = anElement->GetIndexArray().GetAt(aPolygonIdx);
+			outData.mData[0] = anElement->GetDirectArray().GetAt(Idx).mData[0];
+			outData.mData[1] = anElement->GetDirectArray().GetAt(Idx).mData[1];
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference Mode!");
+		}
+	}
+	break;
+	}
+}
+void GetElementMappingdataColor(FbxLayerElementTemplate<FbxColor>* anElement, int aFbxContolPointIdx, int aPolygonIdx, FbxColor& outData)
+{
+	switch (anElement->GetMappingMode())
+	{
+	case FbxGeometryElement::eByControlPoint:
+	{
+		switch (anElement->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			outData = anElement->GetDirectArray().GetAt(aFbxContolPointIdx);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			const int Idx = anElement->GetIndexArray().GetAt(aFbxContolPointIdx);
+			outData = anElement->GetDirectArray().GetAt(Idx);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference Mode!");
+		}
+	}
+	break;
+
+	case FbxGeometryElement::eByPolygonVertex:
+	{
+		switch (anElement->GetReferenceMode())
+		{
+		case FbxGeometryElement::eDirect:
+		{
+			outData = anElement->GetDirectArray().GetAt(aPolygonIdx);
+		}
+		break;
+		case FbxGeometryElement::eIndexToDirect:
+		{
+			const int Idx = anElement->GetIndexArray().GetAt(aPolygonIdx);
+			outData = anElement->GetDirectArray().GetAt(Idx);
+		}
+		break;
+		default:
+			throw std::exception("Invalid Reference Mode!");
+		}
+	}
+	break;
 	}
 }
 
-void FbxLoader::Parser::LoadMesh(FbxNode* node)
+void FbxLoader::Parser::LoadMesh(FbxNode* node, float scale)
 {
 	FbxMesh *mesh = node->GetMesh();
 	if (!mesh) {
@@ -227,56 +569,49 @@ void FbxLoader::Parser::LoadMesh(FbxNode* node)
 
 	FbxLoader::Mesh result = {};
 
-	//get the number of polygons
-	int _polygonCount = mesh->GetPolygonCount();
-	for (int i = 0; i < _polygonCount; i++)
-	{
-		for (int j = 0; j < 3; j++)
-		{
-			int vertexIndex = mesh->GetPolygonVertex(i, j);
-			result.indices.push_back(vertexIndex);
-		}
-	}
-
-	//get the number of vertices
-	int vertexCount = mesh->GetControlPointsCount(); vertexCount;
-	for (int i = 0; i < mesh->GetControlPointsCount(); i++)
-	{
-		/*if (skeleton.joints.size() > 0)
-		{
-			result.positions.push_back(mesh->GetControlPointAt(i));
-		}
-		else*/
-		{
-			result.positions.push_back(mesh->GetControlPointAt(i) * scaleFactor);
-		}
-	}
-
-	//get the number of materials
+	int polyCount = mesh->GetPolygonCount();
+	int deformerCount = mesh->GetDeformerCount();
+	
 	int materialCount = node->GetSrcObjectCount<FbxSurfaceMaterial>(); materialCount;
 	if (materialCount > 0)
 		result.materialName = node->GetSrcObject<FbxSurfaceMaterial>(0)->GetName();
 
-	GetGeometryElement<FbxGeometryElementNormal, FbxVector4>(mesh, result.normals);
-	GetGeometryElement<FbxGeometryElementBinormal, FbxVector4>(mesh, result.bitangents);
-	GetGeometryElement<FbxGeometryElementTangent, FbxVector4>(mesh, result.tangents);
-	GetGeometryElement<FbxGeometryElementUV, FbxVector2>(mesh, result.uvs);
-	GetGeometryElement<FbxGeometryElementVertexColor, FbxVector4>(mesh, result.colors);
+	std::unordered_map<size_t, size_t> hashToRealIndex;
+	std::unordered_map<size_t, std::vector<size_t>> controlPointIndexToRealIndex;
 
-	//get joints and weights
-	int deformerCount = mesh->GetDeformerCount();
-	if (deformerCount > 0)
+	int vertexCounter = 0;
+	for (int polygon = 0; polygon < polyCount; polygon++)
 	{
-		result.jointWeights.resize(result.positions.size());
-		result.jointIndices.resize(result.positions.size());
-		result.jointCount.resize(result.positions.size());
-	}
+		for (int polygonVertex = 0; polygonVertex < 3; polygonVertex++)
+		{
+			int controlPointIndex = mesh->GetPolygonVertex(polygon, polygonVertex);
+			
+			Mesh::VertexData data = {};
+			data.position = mesh->GetControlPointAt(controlPointIndex) * scaleFactor * scale;
+			data.normal = ReadNormal(mesh, controlPointIndex, vertexCounter);
+			data.binormal = ReadBinormal(mesh, controlPointIndex, vertexCounter);
+			data.tangent = ReadTangent(mesh, controlPointIndex, vertexCounter);
+			data.uv = ReadUV(mesh, controlPointIndex, vertexCounter);
+			data.color = ReadVertexColor(mesh, controlPointIndex, vertexCounter);
 
-	for (int i = 0; i < result.jointIndices.size(); i++)
-	{
-		result.jointIndices[i] = { 0, 0, 0, 0 };
-		result.jointWeights[i] = { 0, 0, 0, 0 };
-		result.jointCount[i] = 0;
+			size_t hash = Mesh::hash_vert(data);
+			if (hashToRealIndex.count(hash) > 0)
+			{
+				// Has found earlier
+				result.indices.push_back(hashToRealIndex[hash]);
+				controlPointIndexToRealIndex[controlPointIndex].push_back(hashToRealIndex[hash]);
+			}
+			else
+			{
+				// New vertex
+				hashToRealIndex[hash] = result.vertices.size();
+				controlPointIndexToRealIndex[controlPointIndex].push_back(result.vertices.size());
+				result.indices.push_back(result.vertices.size());
+				result.vertices.push_back(data);
+			}
+
+			vertexCounter++;
+		}
 	}
 
 	for (int deformerIndex = 0; deformerIndex < deformerCount; deformerIndex++)
@@ -302,16 +637,22 @@ void FbxLoader::Parser::LoadMesh(FbxNode* node)
 			for (int i = 0; i < numOfIndices; ++i)
 			{
 				float weight = (float)currCluster->GetControlPointWeights()[i];
-				int index = currCluster->GetControlPointIndices()[i];
+				int controlPointIndex = currCluster->GetControlPointIndices()[i];
 
-				if (weight < 0.01f || result.jointCount[index] >= 3)
-				{
+				if (weight < 0.01f)
 					continue;
-				}
 
-				result.jointWeights[index].weights[result.jointCount[index]] = weight;
-				result.jointIndices[index].indices[result.jointCount[index]] = currJointIndex;
-				result.jointCount[index]++;
+				for (int vertexIndex = 0; vertexIndex < controlPointIndexToRealIndex[controlPointIndex].size(); vertexIndex++)
+				{
+					Mesh::VertexData& vertex = result.vertices[controlPointIndexToRealIndex[controlPointIndex][vertexIndex]];
+
+					if (vertex.jointCount >= (MAX_VERTEX_BONES - 1))
+						continue;
+
+					vertex.jointWeights[vertex.jointCount] = weight;
+					vertex.jointIndices[vertex.jointCount] = currJointIndex;
+					vertex.jointCount++;
+				}
 			}
 		}
 	}
@@ -322,8 +663,13 @@ void FbxLoader::Parser::LoadMeshes()
 {
 	std::vector<FbxNode*> _meshes;
 	FindMeshes(pScene->GetRootNode(), _meshes);
-	for (auto mesh : _meshes) {
-		LoadMesh(mesh);
+	for (auto mesh : _meshes) 
+	{
+		FbxAMatrix transform = mesh->EvaluateGlobalTransform();
+		FbxVector4 size = transform.GetS();
+		float length = (float)(size.mData[0] + size.mData[1] + size.mData[2]) / 3.0f;
+
+		LoadMesh(mesh, length);
 	}
 }
 
@@ -369,16 +715,12 @@ void FbxLoader::Parser::LoadAnimation(Joint* joint, FbxLoader::Animation& result
 
 	result.globalTransforms[boneIndex] = new FbxAMatrix[result.frameCount];
 	result.localTransforms[boneIndex] = new FbxAMatrix[result.frameCount];
-	FbxAMatrix offsetMatrix;
 	for (FbxLongLong frameIndex = 0; frameIndex < result.frameCount; frameIndex++)
 	{
 		FbxTime currTime;
 		currTime.SetFrame(frameIndex, timeMode);
 
-		if (frameIndex == 0)
-			offsetMatrix = GetGlobalTransform(node, currTime).Inverse();
-
-		result.globalTransforms[boneIndex][frameIndex] = /*offsetMatrix **/ GetGlobalTransform(node, currTime);
+		result.globalTransforms[boneIndex][frameIndex] = GetGlobalTransform(node, currTime);
 		result.localTransforms[boneIndex][frameIndex] = GetLocalTransform(node, currTime);
 	}
 }

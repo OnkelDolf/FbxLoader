@@ -2,12 +2,20 @@
 #define FBXPARSER_H
 
 #include <vector>
-#include <unordered_map>
 #include "fbxsdk.h"
+
+// Configuration
+#ifndef MAX_VERTEX_BONES
+#define MAX_VERTEX_BONES 4
+#endif
+#ifndef FLIP_UV_Y
+#define FLIP_UV_Y 1
+#endif
 
 namespace FbxLoader
 {
-	struct Joint {
+	struct Joint 
+	{
 		fbxsdk::FbxString jointName;
 		int currentIndex;	//index of current joint	
 		int parentIndex;	//index to its parent joint
@@ -24,37 +32,42 @@ namespace FbxLoader
 		}
 	};
 
-	struct Skeleton {
+	struct Skeleton
+	{
 		std::vector<Joint> joints;
 	};
 
 	struct Mesh
 	{
-		struct JointIndices
+		struct VertexData
 		{
-			int indices[4];
+			FbxVector4 position = {};
+			FbxVector4 normal = {};
+			FbxVector4 binormal = {};
+			FbxVector4 tangent = {};
+			FbxVector2 uv = {};
+			FbxColor color = {};
+
+			int jointCount = {};
+			unsigned int jointIndices[MAX_VERTEX_BONES] = {};
+			float jointWeights[MAX_VERTEX_BONES] = {};
 		};
-		struct JointWeights
+		static inline size_t hash_vert(VertexData& data) // This is one ghetto ass hashing function. Should probably use something already available.
 		{
-			float weights[4];
-		};
+			char* byte_array = (char*)&data;
+			size_t hash = 0;
 
-		// Index data
-		std::vector<int> indices;
+			for (int i = 0; i < sizeof(data); i++)
+				hash = hash * 31 + byte_array[i];
 
-		// Vertex data
-		std::vector<fbxsdk::FbxVector4> positions;
-		std::vector<fbxsdk::FbxVector4> normals;
-		std::vector<fbxsdk::FbxVector4> tangents;
-		std::vector<fbxsdk::FbxVector4> bitangents;
-		std::vector<fbxsdk::FbxVector2> uvs;
-		std::vector<fbxsdk::FbxVector4> colors;
-		std::vector<JointIndices> jointIndices;
-		std::vector<JointWeights> jointWeights;
-		std::vector<int> jointCount;
+			return hash;
+		}
+
+		std::vector<size_t> indices;
+		std::vector<VertexData> vertices;
+
 		fbxsdk::FbxAMatrix meshToWorld;
 
-		// Material data
 		fbxsdk::FbxString materialName;
 	};
 
@@ -65,8 +78,24 @@ namespace FbxLoader
 		fbxsdk::FbxDouble frameRate;
 		fbxsdk::FbxLongLong frameCount;
 		
-		fbxsdk::FbxAMatrix** localTransforms; // [boneIndex][frameIndex]
-		fbxsdk::FbxAMatrix** globalTransforms;// [boneIndex][frameIndex]
+		fbxsdk::FbxAMatrix** localTransforms;	// [boneIndex][frameIndex]
+		fbxsdk::FbxAMatrix** globalTransforms;	// [boneIndex][frameIndex]
+
+		fbxsdk::FbxAMatrix CalcGlobalTransform(int boneIndex, fbxsdk::FbxLongLong frameIndex, Skeleton* skeleton) // Manual way of calculating global transform for a bone.
+		{
+			if (boneIndex == -1)
+			{
+				fbxsdk::FbxAMatrix identity;
+				identity.SetIdentity();
+				return identity;
+			}
+
+			fbxsdk::FbxAMatrix local = localTransforms[boneIndex][frameIndex];
+			fbxsdk::FbxAMatrix parentGlobal = CalcGlobalTransform(skeleton->joints[boneIndex].parentIndex, frameIndex, skeleton);
+			globalTransforms[boneIndex][frameIndex] = parentGlobal * local;
+
+			return globalTransforms[boneIndex][frameIndex];
+		}
 	};
 
 	class Parser
@@ -105,7 +134,7 @@ namespace FbxLoader
 		FbxNode* FindMesh(FbxNode* node);
 		void FindMeshes(FbxNode* node, std::vector<FbxNode*>& meshes);
 
-		void LoadMesh(FbxNode* node);
+		void LoadMesh(FbxNode* node, float scale = 1.0f);
 		void LoadMeshes();
 
 		void LoadSkeleton(FbxNode* node, int depth, int currIndex, int parentIndex);
