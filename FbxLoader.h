@@ -5,12 +5,9 @@
 #include "fbxsdk.h"
 
 // Configuration
-#ifndef MAX_VERTEX_BONES
 #define MAX_VERTEX_BONES 4
-#endif
-#ifndef FLIP_UV_Y
 #define FLIP_UV_Y 1
-#endif
+#define SPLIT_MESH_MATERIAL 1
 
 namespace FbxLoader
 {
@@ -35,6 +32,33 @@ namespace FbxLoader
 	struct Skeleton
 	{
 		std::vector<Joint> joints;
+		std::unordered_map<std::string, int> jointMap;
+		void Print()
+		{
+			for (int i = 0; i < joints.size(); i++)
+			{
+				printf("Joint %d: %s\n", i, joints[i].jointName.Buffer());
+				/*printf("Parent: %d\n", joints[i].parentIndex);
+				printf("Local Matrix:\n");
+				for (int row = 0; row < 4; row++)
+				{
+					for (int col = 0; col < 4; col++)
+					{
+						printf("%f ", joints[i].localMatrix.Get(row, col));
+					}
+					printf("\n");
+				}
+				printf("Global Matrix:\n");
+				for (int row = 0; row < 4; row++)
+				{
+					for (int col = 0; col < 4; col++)
+					{
+						printf("%f ", joints[i].globalMatrix.Get(row, col));
+					}
+					printf("\n");
+				}*/
+			}
+		}
 	};
 
 	struct Mesh
@@ -47,6 +71,7 @@ namespace FbxLoader
 			FbxVector4 tangent = {};
 			FbxVector2 uv = {};
 			FbxColor color = {};
+			int materialIndex = 0;
 
 			int jointCount = {};
 			unsigned int jointIndices[MAX_VERTEX_BONES] = {};
@@ -69,6 +94,7 @@ namespace FbxLoader
 		fbxsdk::FbxAMatrix meshToWorld;
 
 		fbxsdk::FbxString materialName;
+		int materialIndex;
 	};
 
 	struct Animation
@@ -114,6 +140,8 @@ namespace FbxLoader
 		std::vector<FbxLoader::Animation> animations;
 
 		float scaleFactor = 1.0f;
+
+		int materialCount = 0;
 	private:
 		fbxsdk::FbxManager* pManager = nullptr;
 		fbxsdk::FbxIOSettings* ios = nullptr;
