@@ -147,6 +147,7 @@ namespace FbxLoader
 		fbxsdk::FbxIOSettings* ios = nullptr;
 		fbxsdk::FbxScene* pScene;
 		fbxsdk::FbxString fbxFile;
+		std::unordered_map<std::string, int> materialNameToIndexMap;
 
 		void InitFbxObjects();
 
@@ -162,7 +163,7 @@ namespace FbxLoader
 		FbxNode* FindMesh(FbxNode* node);
 		void FindMeshes(FbxNode* node, std::vector<FbxNode*>& meshes);
 
-		void LoadMesh(FbxNode* node, float scale = 1.0f);
+		void LoadMesh(FbxNode* node);
 		void LoadMeshes();
 
 		void LoadSkeleton(FbxNode* node, int depth, int currIndex, int parentIndex);
@@ -171,11 +172,11 @@ namespace FbxLoader
 		void LoadAnimation(Joint* joint, FbxLoader::Animation& result);
 		FbxLoader::Animation Parser::LoadAnimation(FbxAnimStack* animStack);
 		void LoadAnimations();
-	};
 
-	// Internal helper functions for getting transform matrices with correct scale on translation
-	fbxsdk::FbxAMatrix GetGlobalTransform(fbxsdk::FbxNode* node, fbxsdk::FbxTime time = FBXSDK_TIME_INFINITE);
-	fbxsdk::FbxAMatrix GetLocalTransform(fbxsdk::FbxNode* node, fbxsdk::FbxTime time = FBXSDK_TIME_INFINITE);
+		// Internal helper functions for getting transform matrices with correct scale on translation
+		fbxsdk::FbxAMatrix GetGlobalTransform(fbxsdk::FbxNode* node, fbxsdk::FbxTime time = FBXSDK_TIME_INFINITE);
+		fbxsdk::FbxAMatrix GetLocalTransform(fbxsdk::FbxNode* node, fbxsdk::FbxTime time = FBXSDK_TIME_INFINITE);
+	};
 }
  
 #endif 

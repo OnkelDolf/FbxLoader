@@ -120,11 +120,17 @@ bool FbxLoader::Parser::LoadScene()
 		if (!geomConverter.Triangulate(pScene, true, true)) // Attempt to use faster legacy triangulation algorithm
 			geomConverter.Triangulate(pScene, true, false);
 
+		
+		for (int i = 0; i < pScene->GetMaterialCount(); i++)
+		{
+			materialNameToIndexMap[pScene->GetMaterial(i)->GetName()] = i;
+		}
+
 		LoadSkeleton();
 		LoadMeshes();
 		LoadAnimations();
 
-		// skeleton.Print();
+		//skeleton.Print();
 	}
 
 	pScene->Destroy();
@@ -411,32 +417,57 @@ int ReadMaterial(FbxMesh* mesh, int polygon)
 {
 	if (mesh->GetElementMaterialCount() < 1) { return 0; }
 
-	FbxGeometryElementMaterial* element = mesh->GetElementMaterial(0);
+	//FbxGeometryElementMaterial* element = mesh->GetElementMaterial(0);
 
-	int material = element->GetIndexArray().GetAt(polygon);
+	FbxLayerElementArrayTemplate<int>* materialArray;
+	mesh->GetMaterialIndices(&materialArray);
+
+	int material = materialArray->GetAt(polygon);
 
 	return material;
 }
 
-void FbxLoader::Parser::LoadMesh(FbxNode* node, float scale)
+FbxVector4 TransformFbxVector4(const FbxAMatrix& matrix, const FbxVector4& vector)
+{
+	// Extract the matrix components
+	FbxVector4 translation = matrix.GetT();
+	FbxVector4 rotation = matrix.GetR();
+	FbxVector4 scaling = matrix.GetS();
+
+	// Convert rotation to radians as FbxVector4 assumes degrees
+	//double pi = 3.14159265358979323846;
+	//FbxVector4 rotationRadians(rotation[0] * pi / 180.0, rotation[1] * pi / 180.0, rotation[2] * pi / 180.0);
+
+	// Create rotation matrices
+	FbxAMatrix rotationMatrix;
+	rotationMatrix.SetR(rotation);
+
+	// Create scaling matrix
+	FbxAMatrix scalingMatrix;
+	scalingMatrix.SetS(scaling);
+
+	// Apply rotation and scaling
+	FbxVector4 transformedVector = scalingMatrix.MultT(rotationMatrix.MultT(vector));
+
+	// Apply translation
+	transformedVector += translation;
+
+	return transformedVector;
+}
+
+void FbxLoader::Parser::LoadMesh(FbxNode* node)
 {
 	FbxMesh *mesh = node->GetMesh();
 	if (!mesh) {
 		return;
 	}
 
+	FbxAMatrix transform = node->EvaluateGlobalTransform();
+
 	FbxLoader::Mesh result = {};
 
 	int polyCount = mesh->GetPolygonCount();
 	int deformerCount = mesh->GetDeformerCount();
-
-	/*
-	int materialCount = node->GetSrcObjectCount<FbxSurfaceMaterial>();
-	for (int i = 0; i < materialCount; i++)
-	{
-		result.materialNames.push_back(node->GetSrcObject<FbxSurfaceMaterial>(i)->GetName());
-	}
-	*/
 
 	std::unordered_map<size_t, size_t> hashToRealIndex;
 	std::unordered_map<size_t, std::vector<size_t>> controlPointIndexToRealIndex;
@@ -444,30 +475,21 @@ void FbxLoader::Parser::LoadMesh(FbxNode* node, float scale)
 	int vertexCounter = 0;
 	for (int polygon = 0; polygon < polyCount; polygon++)
 	{
-		/*int materialIndex = 0;
-
-		FbxGeometryElementMaterial* materialElement = mesh->GetElementMaterial(0);
-		if (mesh->GetElementMaterialCount() > 0 && materialElement->GetMappingMode() == FbxLayerElement::eByPolygon)
-		{
-			int material = materialElement->GetIndexArray().GetAt(polygon);
-
-			materialIndex = material;
-		}*/
-
 		for (int polygonVertex = 0; polygonVertex < 3; polygonVertex++)
 		{
 			int controlPointIndex = mesh->GetPolygonVertex(polygon, polygonVertex);
 			
 			Mesh::VertexData data = {};
-			data.position = mesh->GetControlPointAt(controlPointIndex) * scaleFactor * scale;
+			data.position = TransformFbxVector4(transform, mesh->GetControlPointAt(controlPointIndex)) * scaleFactor;
 			data.normal = ReadNormal(mesh, controlPointIndex, vertexCounter);
 			data.binormal = ReadBinormal(mesh, controlPointIndex, vertexCounter);
 			data.tangent = ReadTangent(mesh, controlPointIndex, vertexCounter);
 			data.uv = ReadUV(mesh, controlPointIndex, vertexCounter);
 			data.color = ReadVertexColor(mesh, controlPointIndex, vertexCounter);
-			data.materialIndex = ReadMaterial(mesh, polygon);
-			//data.materialIndex = materialIndex;
-
+			data.materialIndex = ReadMaterial(mesh, vertexCounter);
+			FbxSurfaceMaterial* material = mesh->GetNode()->GetMaterial(data.materialIndex);
+			if (material)
+				data.materialIndex = materialNameToIndexMap[material->GetName()];
 
 			size_t hash = Mesh::hash_vert(data);
 			if (hashToRealIndex.count(hash) > 0)
@@ -552,13 +574,8 @@ void FbxLoader::Parser::LoadMeshes()
 	FindMeshes(pScene->GetRootNode(), _meshes);
 	for (auto mesh : _meshes) 
 	{
-		FbxAMatrix transform = mesh->EvaluateGlobalTransform();
-		FbxVector4 size = transform.GetS();
-		float length = (float)(size.mData[0] + size.mData[1] + size.mData[2]) / 3.0f;
-
-		LoadMesh(mesh, length);
+		LoadMesh(mesh);
 	}
-
 
 	materialCount = pScene->GetSrcObjectCount<FbxSurfaceMaterial>();
 
@@ -640,7 +657,7 @@ void FbxLoader::Parser::LoadSkeleton()
 	FbxNode* rootNode = pScene->GetRootNode();
 	int childCount = rootNode->GetChildCount();
 	for (int i = 0; i != childCount; ++i) {
-		LoadSkeleton(rootNode->GetChild(i), 0, 0, -1);
+		LoadSkeleton(rootNode->GetChild(i), 0, (int)skeleton.joints.size(), -1);
 	}
 }
 
@@ -694,19 +711,22 @@ void FbxLoader::Parser::LoadAnimations()
 		pScene->SetCurrentAnimationStack(animStack);
 
 		animations[animIndex] = LoadAnimation(animStack);
+
+		if (animStackCount > 1)
+			break;
 	}
 }
 
-FbxAMatrix FbxLoader::GetGlobalTransform(FbxNode* node, FbxTime time /*= FBXSDK_TIME_INFINITE*/)
+FbxAMatrix FbxLoader::Parser::GetGlobalTransform(FbxNode* node, FbxTime time /*= FBXSDK_TIME_INFINITE*/)
 {
 	FbxAMatrix globalTransform = node->EvaluateGlobalTransform(time);
-	globalTransform.SetT(globalTransform.GetT() * 0.01f);
+	globalTransform.SetT(globalTransform.GetT() * scaleFactor/** 0.01f*/);
 	return globalTransform;
 }
 
-FbxAMatrix FbxLoader::GetLocalTransform(FbxNode* node, FbxTime time /*= FBXSDK_TIME_INFINITE*/)
+FbxAMatrix FbxLoader::Parser::GetLocalTransform(FbxNode* node, FbxTime time /*= FBXSDK_TIME_INFINITE*/)
 {
 	FbxAMatrix localTransform = node->EvaluateLocalTransform(time);
-	localTransform.SetT(localTransform.GetT() * 0.01f);
+	localTransform.SetT(localTransform.GetT() * scaleFactor/** 0.01f*/);
 	return localTransform;
 }
